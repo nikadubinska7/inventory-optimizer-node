@@ -87,7 +87,7 @@ The user is not a developer.
 
 When giving instructions to the user:
 - Be extremely explicit.
-- Use small steps.
+- Use small steps. One step at a time. do not proceed to the next step until the user say so.
 - Explain every decision in plain English before giving code.
 - Always choose one recommended approach.
 - Optimize for the fastest path to a working MVP.
