@@ -1,4 +1,5 @@
 import Link from "next/link"
+import { headers } from "next/headers"
 import { redirect } from "next/navigation"
 
 import { createClient } from "@/lib/supabase/server"
@@ -26,11 +27,16 @@ async function signup(formData: FormData) {
   const email = String(formData.get("email") || "").trim()
   const password = String(formData.get("password") || "")
 
+  const origin = (await headers()).get("origin")
+
   const supabase = await createClient()
 
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
+    options: {
+      emailRedirectTo: `${origin}/auth/callback?next=/dashboard`,
+    },
   })
 
   if (error) {
@@ -39,7 +45,7 @@ async function signup(formData: FormData) {
 
   if (!data.session) {
     redirect(
-      "/login?message=Account created. Check your email if confirmation is required, then log in."
+      "/login?message=Account created. Check your email, confirm the account, then log in."
     )
   }
 
