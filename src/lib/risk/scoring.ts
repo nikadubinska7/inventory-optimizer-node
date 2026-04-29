@@ -35,7 +35,7 @@ export function calculateRiskScores(
   const averageDailyDemand = calculateAverage(input.recentDemandQty)
   const availableQty = Math.max(input.onHandQty - input.reservedQty, 0)
   const daysOfCover =
-    averageDailyDemand > 0 ? roundToTwoDecimals(availableQty / averageDailyDemand) : null
+    averageDailyDemand > 0 ? toWholeDays(availableQty / averageDailyDemand) : null
   const leadTimeDays = input.leadTimeDays ?? DEFAULT_LEAD_TIME_DAYS
 
   return [
@@ -146,6 +146,10 @@ function clampScore(score: number) {
 
 function roundToTwoDecimals(value: number) {
   return Math.round(value * 100) / 100
+}
+
+function toWholeDays(value: number) {
+  return Math.max(Math.round(value), 0)
 }
 
 function getSeverity(score: number): RiskSeverity {

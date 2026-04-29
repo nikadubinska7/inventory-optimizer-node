@@ -21,7 +21,8 @@ Phase 2 — Authentication: COMPLETE.
 Phase 3 — Database schema: COMPLETE.
 Phase 4 — CSV upload + import: COMPLETE.
 Phase 5 — Risk scoring: COMPLETE.
-Next phase: Phase 6 — Recommendation engine.
+Phase 6 — Recommendation engine: COMPLETE.
+Next phase: Phase 7 — Dashboard UI.
 
 Project folder:
 - inventory-optimizer-node
@@ -140,8 +141,8 @@ Phase 2 — Authentication: COMPLETE
 Phase 3 — Database schema: COMPLETE
 Phase 4 — CSV upload + import: COMPLETE
 Phase 5 — Risk scoring: COMPLETE
-Phase 6 — Recommendation engine: NEXT
-Phase 7 — Dashboard UI
+Phase 6 — Recommendation engine: COMPLETE
+Phase 7 — Dashboard UI: NEXT
 Phase 8 — Export + demo data
 Phase 9 — QA + deployment
 
@@ -216,6 +217,26 @@ Important risk scoring decisions:
 - The dashboard displays product, SKU, location, risk type, score, severity, days of cover, and explanation.
 - Risk scoring rules are documented in docs/risk-scoring-rules.md.
 - No new production dependencies were added for Phase 5.
+
+## Current completed recommendation implementation
+
+Phase 6 created and verified the MVP recommendation engine.
+
+Implemented recommendation types:
+- transfer
+- reorder_hold
+- markdown
+- service_level_tradeoff
+
+Important recommendation decisions:
+- Recommendations are generated from the latest saved risk scores and latest inventory snapshots.
+- Recommendations are saved into recommendations.
+- Each recommendation gets a matching row in recommendation_audit_logs.
+- The dashboard can generate recommendations and show the latest saved recommendations.
+- The dashboard displays product, SKU, action, source/destination locations, quantity, days, priority, and explanation.
+- Recommendation quantities and days are whole numbers.
+- Recommendation wording is intentionally MVP-level and should be fine-tuned after the core MVP is complete.
+- No new production dependencies were added for Phase 6.
 
 ## Phase 3 target
 

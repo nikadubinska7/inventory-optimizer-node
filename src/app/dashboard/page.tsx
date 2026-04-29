@@ -9,6 +9,7 @@ import {
   type CsvImportProgress,
   getCsvImportStepStatuses,
 } from "@/lib/csv/import-order"
+import { generateRecommendations } from "@/lib/recommendations/engine"
 import { calculateRiskScores } from "@/lib/risk/scoring"
 import { CsvUploadPreview } from "@/components/csv/csv-upload-preview"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -49,6 +50,24 @@ type RiskScoreDashboardData = {
   overstockCount: number
 }
 
+type DashboardRecommendation = {
+  id: string
+  productName: string
+  productSku: string
+  sourceLocationName: string | null
+  destinationLocationName: string | null
+  recommendationType: string
+  status: string
+  priority: string
+  quantity: number | null
+  daysToAct: number | null
+  markdownPercent: number | null
+  serviceLevelBefore: number | null
+  serviceLevelAfter: number | null
+  expectedImpact: string | null
+  explanation: string
+}
+
 async function getCsvImportProgress(
   supabase: Awaited<ReturnType<typeof createClient>>
 ): Promise<CsvImportProgress> {
@@ -72,6 +91,80 @@ async function getCsvImportProgress(
     inventory_snapshots: (inventorySnapshotsResult.count ?? 0) > 0,
     demand_history: (demandHistoryResult.count ?? 0) > 0,
   }
+}
+
+async function getLatestRecommendations(
+  supabase: Awaited<ReturnType<typeof createClient>>
+): Promise<DashboardRecommendation[]> {
+  const [
+    { data: recommendations },
+    { data: products },
+    { data: locations },
+  ] = await Promise.all([
+    supabase
+      .from("recommendations")
+      .select(
+        "id, product_id, source_location_id, destination_location_id, recommendation_type, status, priority, quantity, days_to_act, markdown_percent, service_level_before, service_level_after, expected_impact, explanation, created_at"
+      )
+      .order("created_at", { ascending: false })
+      .limit(8),
+    supabase.from("products").select("id, sku, name"),
+    supabase.from("locations").select("id, name"),
+  ])
+
+  if (!recommendations?.length) {
+    return []
+  }
+
+  const productsById = new Map(
+    products?.map((product) => [product.id, product]) ?? []
+  )
+  const locationsById = new Map(
+    locations?.map((location) => [location.id, location]) ?? []
+  )
+
+  return recommendations.map((recommendation) => {
+    const product = productsById.get(recommendation.product_id)
+    const sourceLocation = recommendation.source_location_id
+      ? locationsById.get(recommendation.source_location_id)
+      : null
+    const destinationLocation = recommendation.destination_location_id
+      ? locationsById.get(recommendation.destination_location_id)
+      : null
+
+    return {
+      id: recommendation.id,
+      productName: product?.name ?? "Unknown product",
+      productSku: product?.sku ?? "Unknown SKU",
+      sourceLocationName: sourceLocation?.name ?? null,
+      destinationLocationName: destinationLocation?.name ?? null,
+      recommendationType: recommendation.recommendation_type,
+      status: recommendation.status,
+      priority: recommendation.priority,
+      quantity:
+        recommendation.quantity === null
+          ? null
+          : Math.round(Number(recommendation.quantity)),
+      daysToAct:
+        recommendation.days_to_act === null
+          ? null
+          : Math.round(Number(recommendation.days_to_act)),
+      markdownPercent:
+        recommendation.markdown_percent === null
+          ? null
+          : Math.round(Number(recommendation.markdown_percent)),
+      serviceLevelBefore:
+        recommendation.service_level_before === null
+          ? null
+          : Math.round(Number(recommendation.service_level_before)),
+      serviceLevelAfter:
+        recommendation.service_level_after === null
+          ? null
+          : Math.round(Number(recommendation.service_level_after)),
+      expectedImpact: recommendation.expected_impact,
+      explanation: recommendation.explanation,
+    }
+  })
 }
 
 async function getRiskScoreDashboardData(
@@ -126,7 +219,7 @@ async function getRiskScoreDashboardData(
         daysOfCover:
           riskScore.days_of_cover === null
             ? null
-            : Number(riskScore.days_of_cover),
+            : Math.round(Number(riskScore.days_of_cover)),
         explanation: riskScore.explanation,
         scoreDate: riskScore.score_date,
       }
@@ -549,6 +642,172 @@ async function calculateRiskScoresForUser() {
   )
 }
 
+async function generateRecommendationsForUser() {
+  "use server"
+
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    redirect("/login")
+  }
+
+  const [
+    { data: riskScores },
+    { data: inventorySnapshots },
+  ] = await Promise.all([
+    supabase
+      .from("risk_scores")
+      .select(
+        "product_id, location_id, risk_type, risk_score, severity, days_of_cover, inputs_summary, score_date"
+      )
+      .order("score_date", { ascending: false }),
+    supabase
+      .from("inventory_snapshots")
+      .select(
+        "product_id, location_id, snapshot_date, on_hand_qty, on_order_qty, reserved_qty, safety_stock_qty"
+      ),
+  ])
+
+  if (!riskScores?.length || !inventorySnapshots?.length) {
+    redirect(
+      "/dashboard?error=Calculate risk scores before generating recommendations."
+    )
+  }
+
+  const latestScoreDate = riskScores[0].score_date
+  const latestRiskScores = riskScores.filter(
+    (riskScore) => riskScore.score_date === latestScoreDate
+  )
+  const latestInventoryByProductLocation = new Map<
+    string,
+    (typeof inventorySnapshots)[number]
+  >()
+
+  inventorySnapshots.forEach((snapshot) => {
+    const key = `${snapshot.product_id}:${snapshot.location_id}`
+    const existingSnapshot = latestInventoryByProductLocation.get(key)
+
+    if (
+      !existingSnapshot ||
+      snapshot.snapshot_date > existingSnapshot.snapshot_date
+    ) {
+      latestInventoryByProductLocation.set(key, snapshot)
+    }
+  })
+
+  const recommendationInputs = latestRiskScores.flatMap((riskScore) => {
+    const snapshot = latestInventoryByProductLocation.get(
+      `${riskScore.product_id}:${riskScore.location_id}`
+    )
+
+    if (!snapshot) {
+      return []
+    }
+
+    return {
+      productId: riskScore.product_id,
+      sourceLocationId: riskScore.location_id,
+      destinationLocationId: null,
+      riskType: riskScore.risk_type,
+      riskScore: Number(riskScore.risk_score),
+      severity: riskScore.severity,
+      daysOfCover:
+        riskScore.days_of_cover === null ? null : Number(riskScore.days_of_cover),
+      onHandQty: snapshot.on_hand_qty,
+      onOrderQty: snapshot.on_order_qty,
+      reservedQty: snapshot.reserved_qty,
+      safetyStockQty: snapshot.safety_stock_qty,
+      averageDailyDemand: getAverageDailyDemand(riskScore.inputs_summary),
+    }
+  })
+
+  const generatedRecommendations = generateRecommendations(recommendationInputs)
+
+  if (generatedRecommendations.length === 0) {
+    redirect(
+      "/dashboard?message=No recommendations were generated from the latest risk scores."
+    )
+  }
+
+  const { data: savedRecommendations, error: recommendationsError } =
+    await supabase
+      .from("recommendations")
+      .insert(
+        generatedRecommendations.map((recommendation) => ({
+          user_id: user.id,
+          product_id: recommendation.productId,
+          source_location_id: recommendation.sourceLocationId,
+          destination_location_id: recommendation.destinationLocationId,
+          recommendation_type: recommendation.recommendationType,
+          status: "open",
+          priority: recommendation.priority,
+          quantity: recommendation.quantity,
+          hold_until_date: recommendation.holdUntilDate,
+          markdown_percent: recommendation.markdownPercent,
+          days_to_act: recommendation.daysToAct,
+          service_level_before: recommendation.serviceLevelBefore,
+          service_level_after: recommendation.serviceLevelAfter,
+          expected_impact: recommendation.expectedImpact,
+          explanation: recommendation.explanation,
+        }))
+      )
+      .select("id")
+
+  if (recommendationsError || !savedRecommendations) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent(
+        "Recommendations could not be generated."
+      )}`
+    )
+  }
+
+  const { error: auditLogError } = await supabase
+    .from("recommendation_audit_logs")
+    .insert(
+      generatedRecommendations.map((recommendation, index) => ({
+        user_id: user.id,
+        recommendation_id: savedRecommendations[index].id,
+        rule_code: recommendation.auditLog.ruleCode,
+        rule_name: recommendation.auditLog.ruleName,
+        input_snapshot: recommendation.auditLog.inputSnapshot,
+        calculation_summary: recommendation.auditLog.calculationSummary,
+        result_summary: recommendation.auditLog.resultSummary,
+      }))
+    )
+
+  if (auditLogError) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent(
+        "Recommendations were saved, but audit logs could not be created."
+      )}`
+    )
+  }
+
+  redirect(
+    `/dashboard?message=${encodeURIComponent(
+      `Generated ${generatedRecommendations.length} recommendations.`
+    )}`
+  )
+}
+
+function getAverageDailyDemand(inputsSummary: unknown) {
+  if (
+    typeof inputsSummary === "object" &&
+    inputsSummary !== null &&
+    "average_daily_demand" in inputsSummary
+  ) {
+    const value = Number(inputsSummary.average_daily_demand)
+
+    return Number.isFinite(value) ? value : 0
+  }
+
+  return 0
+}
+
 async function logout() {
   "use server"
 
@@ -583,6 +842,8 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   const allImportsComplete = Object.values(importProgress).every(Boolean)
   const riskScoreData = await getRiskScoreDashboardData(supabase)
   const highestRiskScores = riskScoreData.latestScores.slice(0, 8)
+  const canGenerateRecommendations = riskScoreData.latestScores.length > 0
+  const latestRecommendations = await getLatestRecommendations(supabase)
 
   return (
     <main className="min-h-screen bg-slate-950 px-6 py-8 text-slate-100">
@@ -869,6 +1130,117 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
             ) : (
               <p className="text-sm text-slate-400">
                 No risk scores have been calculated yet.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-slate-800 bg-slate-900 text-slate-100">
+          <CardHeader>
+            <CardTitle>Recommendation engine</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-slate-400">
+              Generate explainable transfer, reorder hold, markdown, and
+              service-level tradeoff recommendations from the latest risk scores.
+            </p>
+
+            <form action={generateRecommendationsForUser}>
+              <Button
+                type="submit"
+                disabled={!canGenerateRecommendations}
+                className="w-full sm:w-auto"
+              >
+                Generate recommendations
+              </Button>
+            </form>
+
+            {!canGenerateRecommendations ? (
+              <p className="text-sm text-amber-300">
+                Calculate risk scores before generating recommendations.
+              </p>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="border-slate-800 bg-slate-900 text-slate-100">
+          <CardHeader>
+            <CardTitle>Latest recommendations</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {latestRecommendations.length > 0 ? (
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-slate-800 hover:bg-transparent">
+                    <TableHead className="text-slate-400">Product</TableHead>
+                    <TableHead className="text-slate-400">Action</TableHead>
+                    <TableHead className="text-slate-400">Locations</TableHead>
+                    <TableHead className="text-slate-400">Qty</TableHead>
+                    <TableHead className="text-slate-400">Days</TableHead>
+                    <TableHead className="text-slate-400">Priority</TableHead>
+                    <TableHead className="text-slate-400">Explanation</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {latestRecommendations.map((recommendation) => (
+                    <TableRow
+                      key={recommendation.id}
+                      className="border-slate-800 hover:bg-slate-950"
+                    >
+                      <TableCell>
+                        <div>
+                          <p className="text-slate-100">
+                            {recommendation.productName}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {recommendation.productSku}
+                          </p>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div>
+                          <p className="capitalize text-slate-100">
+                            {recommendation.recommendationType.replaceAll(
+                              "_",
+                              " "
+                            )}
+                          </p>
+                          <p className="text-xs capitalize text-slate-500">
+                            {recommendation.status}
+                          </p>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-slate-300">
+                        {recommendation.destinationLocationName ? (
+                          <span>
+                            {recommendation.sourceLocationName} to{" "}
+                            {recommendation.destinationLocationName}
+                          </span>
+                        ) : (
+                          recommendation.sourceLocationName ?? "No location"
+                        )}
+                      </TableCell>
+                      <TableCell className="text-slate-300">
+                        {recommendation.quantity ?? "-"}
+                      </TableCell>
+                      <TableCell className="text-slate-300">
+                        {recommendation.daysToAct ?? "-"}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="secondary" className="capitalize">
+                          {recommendation.priority}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="max-w-xs whitespace-normal text-slate-400">
+                        {recommendation.explanation}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <p className="text-sm text-slate-400">
+                No recommendations have been generated yet.
               </p>
             )}
           </CardContent>
