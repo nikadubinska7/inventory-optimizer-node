@@ -19,7 +19,8 @@ The product must function as a daily decision tool, not just a dashboard.
 Phase 1 — Project bootstrap: COMPLETE.
 Phase 2 — Authentication: COMPLETE.
 Phase 3 — Database schema: COMPLETE.
-Next phase: Phase 4 — CSV upload + import.
+Phase 4 — CSV upload + import: COMPLETE.
+Next phase: Phase 5 — Risk scoring.
 
 Project folder:
 - inventory-optimizer-node
@@ -136,8 +137,8 @@ Quality rules:
 Phase 1 — Project bootstrap: COMPLETE
 Phase 2 — Authentication: COMPLETE
 Phase 3 — Database schema: COMPLETE
-Phase 4 — CSV upload + import: NEXT
-Phase 5 — Risk scoring
+Phase 4 — CSV upload + import: COMPLETE
+Phase 5 — Risk scoring: NEXT
 Phase 6 — Recommendation engine
 Phase 7 — Dashboard UI
 Phase 8 — Export + demo data
@@ -167,6 +168,30 @@ Important schema decisions:
 - Recommendations support transfer, reorder_hold, markdown, and service_level_tradeoff types.
 - Recommendation audit logs store the rule, inputs, calculation summary, and result summary for explainability.
 - No organizations, teams, roles, or enterprise permissions were added for the MVP.
+
+## Current completed CSV import implementation
+
+Phase 4 created and verified the MVP CSV upload and import flow.
+
+Implemented imports:
+- products
+- locations
+- inventory_snapshots
+- demand_history
+
+Important CSV import decisions:
+- CSV files do not need to use exact Supabase column names.
+- The app detects common English column aliases and shows a mapping preview before import.
+- Non-English or unrecognized headers are shown as needing manual mapping in the preview flow.
+- Technical database fields such as id, user_id, created_at, and updated_at are not included in user CSV files.
+- The dashboard enforces import order: products, locations, inventory snapshots, then demand history.
+- Later import steps stay locked until earlier required data exists for the logged-in user.
+- Products are upserted by user_id and sku.
+- Locations are upserted by user_id and name.
+- Inventory snapshots use CSV SKU and location name to find product_id and location_id before saving.
+- Demand history uses CSV SKU and location name to find product_id and location_id before saving.
+- Active buttons use a hand cursor when clickable.
+- No new production dependencies were added for Phase 4.
 
 ## Phase 3 target
 

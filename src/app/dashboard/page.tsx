@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation"
 
 import { createClient } from "@/lib/supabase/server"
+import { parseDemandCsvForImport } from "@/lib/csv/demand-import"
+import { parseInventoryCsvForImport } from "@/lib/csv/inventory-import"
 import { parseLocationsCsvForImport } from "@/lib/csv/location-import"
 import { parseProductsCsvForImport } from "@/lib/csv/product-import"
 import {
@@ -137,6 +139,198 @@ async function importLocationsCsv(formData: FormData) {
   redirect(
     `/dashboard?message=${encodeURIComponent(
       `Imported ${parsedLocations.rows.length} locations.`
+    )}`
+  )
+}
+
+async function importInventoryCsv(formData: FormData) {
+  "use server"
+
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    redirect("/login")
+  }
+
+  const csvFile = formData.get("csvFile")
+
+  if (!(csvFile instanceof File)) {
+    redirect("/dashboard?error=Choose an inventory snapshots CSV file first.")
+  }
+
+  const csvText = await csvFile.text()
+  const parsedInventory = parseInventoryCsvForImport(csvText)
+
+  if (!parsedInventory.ok) {
+    redirect(`/dashboard?error=${encodeURIComponent(parsedInventory.error)}`)
+  }
+
+  const [{ data: products }, { data: locations }] = await Promise.all([
+    supabase.from("products").select("id, sku"),
+    supabase.from("locations").select("id, name"),
+  ])
+
+  const productIdBySku = new Map(
+    products?.map((product) => [product.sku.toLowerCase(), product.id]) ?? []
+  )
+  const locationIdByName = new Map(
+    locations?.map((location) => [
+      location.name.toLowerCase(),
+      location.id,
+    ]) ?? []
+  )
+
+  const missingProduct = parsedInventory.rows.find(
+    (row) => !productIdBySku.has(row.sku.toLowerCase())
+  )
+  const missingLocation = parsedInventory.rows.find(
+    (row) => !locationIdByName.has(row.location_name.toLowerCase())
+  )
+
+  if (missingProduct) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent(
+        `Product SKU not found: ${missingProduct.sku}. Import products first.`
+      )}`
+    )
+  }
+
+  if (missingLocation) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent(
+        `Location not found: ${missingLocation.location_name}. Import locations first.`
+      )}`
+    )
+  }
+
+  const { error } = await supabase.from("inventory_snapshots").upsert(
+    parsedInventory.rows.map((row) => ({
+      user_id: user.id,
+      product_id: productIdBySku.get(row.sku.toLowerCase()),
+      location_id: locationIdByName.get(row.location_name.toLowerCase()),
+      snapshot_date: row.snapshot_date,
+      on_hand_qty: row.on_hand_qty,
+      on_order_qty: row.on_order_qty,
+      reserved_qty: row.reserved_qty,
+      safety_stock_qty: row.safety_stock_qty,
+      source_type: "csv_import",
+      notes: row.notes,
+    })),
+    {
+      onConflict: "user_id,product_id,location_id,snapshot_date",
+    }
+  )
+
+  if (error) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent(
+        "Inventory snapshots could not be imported."
+      )}`
+    )
+  }
+
+  redirect(
+    `/dashboard?message=${encodeURIComponent(
+      `Imported ${parsedInventory.rows.length} inventory snapshots.`
+    )}`
+  )
+}
+
+async function importDemandCsv(formData: FormData) {
+  "use server"
+
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    redirect("/login")
+  }
+
+  const csvFile = formData.get("csvFile")
+
+  if (!(csvFile instanceof File)) {
+    redirect("/dashboard?error=Choose a demand history CSV file first.")
+  }
+
+  const csvText = await csvFile.text()
+  const parsedDemand = parseDemandCsvForImport(csvText)
+
+  if (!parsedDemand.ok) {
+    redirect(`/dashboard?error=${encodeURIComponent(parsedDemand.error)}`)
+  }
+
+  const [{ data: products }, { data: locations }] = await Promise.all([
+    supabase.from("products").select("id, sku"),
+    supabase.from("locations").select("id, name"),
+  ])
+
+  const productIdBySku = new Map(
+    products?.map((product) => [product.sku.toLowerCase(), product.id]) ?? []
+  )
+  const locationIdByName = new Map(
+    locations?.map((location) => [
+      location.name.toLowerCase(),
+      location.id,
+    ]) ?? []
+  )
+
+  const missingProduct = parsedDemand.rows.find(
+    (row) => !productIdBySku.has(row.sku.toLowerCase())
+  )
+  const missingLocation = parsedDemand.rows.find(
+    (row) => !locationIdByName.has(row.location_name.toLowerCase())
+  )
+
+  if (missingProduct) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent(
+        `Product SKU not found: ${missingProduct.sku}. Import products first.`
+      )}`
+    )
+  }
+
+  if (missingLocation) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent(
+        `Location not found: ${missingLocation.location_name}. Import locations first.`
+      )}`
+    )
+  }
+
+  const { error } = await supabase.from("demand_history").upsert(
+    parsedDemand.rows.map((row) => ({
+      user_id: user.id,
+      product_id: productIdBySku.get(row.sku.toLowerCase()),
+      location_id: locationIdByName.get(row.location_name.toLowerCase()),
+      demand_date: row.demand_date,
+      demand_qty: row.demand_qty,
+      demand_type: row.demand_type,
+      source_type: "csv_import",
+      notes: row.notes,
+    })),
+    {
+      onConflict: "user_id,product_id,location_id,demand_date,demand_type",
+    }
+  )
+
+  if (error) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent(
+        "Demand history could not be imported."
+      )}`
+    )
+  }
+
+  redirect(
+    `/dashboard?message=${encodeURIComponent(
+      `Imported ${parsedDemand.rows.length} demand history rows.`
     )}`
   )
 }
@@ -329,6 +523,10 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                           ? importProductsCsv
                           : step.importType === "locations"
                             ? importLocationsCsv
+                            : step.importType === "inventory_snapshots"
+                              ? importInventoryCsv
+                              : step.importType === "demand_history"
+                                ? importDemandCsv
                           : undefined
                       }
                     />
