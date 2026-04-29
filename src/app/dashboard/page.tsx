@@ -9,6 +9,7 @@ import {
   type CsvImportProgress,
   getCsvImportStepStatuses,
 } from "@/lib/csv/import-order"
+import { calculateRiskScores } from "@/lib/risk/scoring"
 import { CsvUploadPreview } from "@/components/csv/csv-upload-preview"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -19,6 +20,34 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+
+type DashboardRiskScore = {
+  id: string
+  productName: string
+  productSku: string
+  locationName: string
+  riskType: string
+  riskScore: number
+  severity: string
+  daysOfCover: number | null
+  explanation: string
+  scoreDate: string
+}
+
+type RiskScoreDashboardData = {
+  latestScoreDate: string | null
+  latestScores: DashboardRiskScore[]
+  stockoutCount: number
+  overstockCount: number
+}
 
 async function getCsvImportProgress(
   supabase: Awaited<ReturnType<typeof createClient>>
@@ -42,6 +71,74 @@ async function getCsvImportProgress(
     locations: (locationsResult.count ?? 0) > 0,
     inventory_snapshots: (inventorySnapshotsResult.count ?? 0) > 0,
     demand_history: (demandHistoryResult.count ?? 0) > 0,
+  }
+}
+
+async function getRiskScoreDashboardData(
+  supabase: Awaited<ReturnType<typeof createClient>>
+): Promise<RiskScoreDashboardData> {
+  const [
+    { data: riskScores },
+    { data: products },
+    { data: locations },
+  ] = await Promise.all([
+    supabase
+      .from("risk_scores")
+      .select(
+        "id, product_id, location_id, risk_type, risk_score, severity, days_of_cover, explanation, score_date"
+      )
+      .order("score_date", { ascending: false })
+      .order("risk_score", { ascending: false }),
+    supabase.from("products").select("id, sku, name"),
+    supabase.from("locations").select("id, name"),
+  ])
+
+  if (!riskScores?.length) {
+    return {
+      latestScoreDate: null,
+      latestScores: [],
+      stockoutCount: 0,
+      overstockCount: 0,
+    }
+  }
+
+  const latestScoreDate = riskScores[0].score_date
+  const productsById = new Map(
+    products?.map((product) => [product.id, product]) ?? []
+  )
+  const locationsById = new Map(
+    locations?.map((location) => [location.id, location]) ?? []
+  )
+  const latestScores = riskScores
+    .filter((riskScore) => riskScore.score_date === latestScoreDate)
+    .map((riskScore) => {
+      const product = productsById.get(riskScore.product_id)
+      const location = locationsById.get(riskScore.location_id)
+
+      return {
+        id: riskScore.id,
+        productName: product?.name ?? "Unknown product",
+        productSku: product?.sku ?? "Unknown SKU",
+        locationName: location?.name ?? "Unknown location",
+        riskType: riskScore.risk_type,
+        riskScore: Number(riskScore.risk_score),
+        severity: riskScore.severity,
+        daysOfCover:
+          riskScore.days_of_cover === null
+            ? null
+            : Number(riskScore.days_of_cover),
+        explanation: riskScore.explanation,
+        scoreDate: riskScore.score_date,
+      }
+    })
+
+  return {
+    latestScoreDate,
+    latestScores,
+    stockoutCount: latestScores.filter((score) => score.riskType === "stockout")
+      .length,
+    overstockCount: latestScores.filter((score) => score.riskType === "overstock")
+      .length,
   }
 }
 
@@ -335,6 +432,123 @@ async function importDemandCsv(formData: FormData) {
   )
 }
 
+async function calculateRiskScoresForUser() {
+  "use server"
+
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    redirect("/login")
+  }
+
+  const [
+    { data: products },
+    { data: inventorySnapshots },
+    { data: demandHistory },
+  ] = await Promise.all([
+    supabase.from("products").select("id, lead_time_days"),
+    supabase
+      .from("inventory_snapshots")
+      .select(
+        "product_id, location_id, snapshot_date, on_hand_qty, on_order_qty, reserved_qty, safety_stock_qty"
+      ),
+    supabase
+      .from("demand_history")
+      .select("product_id, location_id, demand_date, demand_qty"),
+  ])
+
+  if (!products?.length || !inventorySnapshots?.length || !demandHistory?.length) {
+    redirect(
+      "/dashboard?error=Import products, inventory snapshots, and demand history before calculating risk scores."
+    )
+  }
+
+  const leadTimeDaysByProductId = new Map(
+    products.map((product) => [product.id, product.lead_time_days])
+  )
+  const latestInventoryByProductLocation = new Map<
+    string,
+    (typeof inventorySnapshots)[number]
+  >()
+
+  inventorySnapshots.forEach((snapshot) => {
+    const key = `${snapshot.product_id}:${snapshot.location_id}`
+    const existingSnapshot = latestInventoryByProductLocation.get(key)
+
+    if (
+      !existingSnapshot ||
+      snapshot.snapshot_date > existingSnapshot.snapshot_date
+    ) {
+      latestInventoryByProductLocation.set(key, snapshot)
+    }
+  })
+
+  const demandByProductLocation = new Map<string, number[]>()
+
+  demandHistory.forEach((demandRow) => {
+    const key = `${demandRow.product_id}:${demandRow.location_id}`
+    const existingDemand = demandByProductLocation.get(key) ?? []
+
+    existingDemand.push(demandRow.demand_qty)
+    demandByProductLocation.set(key, existingDemand)
+  })
+
+  const scoreDate = new Date().toISOString().slice(0, 10)
+  const riskScores = Array.from(latestInventoryByProductLocation.values())
+    .flatMap((snapshot) =>
+      calculateRiskScores({
+        productId: snapshot.product_id,
+        locationId: snapshot.location_id,
+        scoreDate,
+        onHandQty: snapshot.on_hand_qty,
+        onOrderQty: snapshot.on_order_qty,
+        reservedQty: snapshot.reserved_qty,
+        safetyStockQty: snapshot.safety_stock_qty,
+        leadTimeDays: leadTimeDaysByProductId.get(snapshot.product_id) ?? null,
+        recentDemandQty:
+          demandByProductLocation.get(
+            `${snapshot.product_id}:${snapshot.location_id}`
+          ) ?? [],
+      })
+    )
+    .map((score) => ({
+      user_id: user.id,
+      product_id: score.productId,
+      location_id: score.locationId,
+      score_date: score.scoreDate,
+      risk_type: score.riskType,
+      risk_score: score.riskScore,
+      severity: score.severity,
+      days_of_cover: score.daysOfCover,
+      explanation: score.explanation,
+      inputs_summary: score.inputsSummary,
+    }))
+
+  if (riskScores.length === 0) {
+    redirect("/dashboard?error=No inventory rows were available for risk scoring.")
+  }
+
+  const { error } = await supabase.from("risk_scores").upsert(riskScores, {
+    onConflict: "user_id,product_id,location_id,score_date,risk_type",
+  })
+
+  if (error) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent("Risk scores could not be calculated.")}`
+    )
+  }
+
+  redirect(
+    `/dashboard?message=${encodeURIComponent(
+      `Calculated ${riskScores.length} risk scores.`
+    )}`
+  )
+}
+
 async function logout() {
   "use server"
 
@@ -366,6 +580,9 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
 
   const importProgress = await getCsvImportProgress(supabase)
   const importStepStatuses = getCsvImportStepStatuses(importProgress)
+  const allImportsComplete = Object.values(importProgress).every(Boolean)
+  const riskScoreData = await getRiskScoreDashboardData(supabase)
+  const highestRiskScores = riskScoreData.latestScores.slice(0, 8)
 
   return (
     <main className="min-h-screen bg-slate-950 px-6 py-8 text-slate-100">
@@ -408,9 +625,20 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
               <CardTitle className="text-base">Stockout Risk</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-slate-400">
-                Locations likely to run out before the next replenishment cycle.
-              </p>
+              {riskScoreData.latestScoreDate ? (
+                <div>
+                  <p className="text-3xl font-semibold">
+                    {riskScoreData.stockoutCount}
+                  </p>
+                  <p className="text-sm text-slate-400">
+                    Latest stockout scores calculated.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-400">
+                  Locations likely to run out before the next replenishment cycle.
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -419,9 +647,20 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
               <CardTitle className="text-base">Overstock Risk</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-slate-400">
-                Locations holding more inventory than expected demand supports.
-              </p>
+              {riskScoreData.latestScoreDate ? (
+                <div>
+                  <p className="text-3xl font-semibold">
+                    {riskScoreData.overstockCount}
+                  </p>
+                  <p className="text-sm text-slate-400">
+                    Latest overstock scores calculated.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-400">
+                  Locations holding more inventory than expected demand supports.
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -534,6 +773,104 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
                 </div>
               ))}
             </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-slate-800 bg-slate-900 text-slate-100">
+          <CardHeader>
+            <CardTitle>Risk scoring</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-slate-400">
+              Calculate stockout and overstock risk scores from the imported
+              inventory and demand data.
+            </p>
+
+            <form action={calculateRiskScoresForUser}>
+              <Button
+                type="submit"
+                disabled={!allImportsComplete}
+                className="w-full sm:w-auto"
+              >
+                Calculate risk scores
+              </Button>
+            </form>
+
+            {!allImportsComplete ? (
+              <p className="text-sm text-amber-300">
+                Complete all CSV imports before calculating risk scores.
+              </p>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="border-slate-800 bg-slate-900 text-slate-100">
+          <CardHeader>
+            <CardTitle>Latest risk scores</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {highestRiskScores.length > 0 ? (
+              <div className="space-y-4">
+                <p className="text-sm text-slate-400">
+                  Showing latest scores from {riskScoreData.latestScoreDate}.
+                </p>
+
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-slate-800 hover:bg-transparent">
+                      <TableHead className="text-slate-400">Product</TableHead>
+                      <TableHead className="text-slate-400">Location</TableHead>
+                      <TableHead className="text-slate-400">Risk</TableHead>
+                      <TableHead className="text-slate-400">Score</TableHead>
+                      <TableHead className="text-slate-400">Severity</TableHead>
+                      <TableHead className="text-slate-400">Days cover</TableHead>
+                      <TableHead className="text-slate-400">Explanation</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {highestRiskScores.map((score) => (
+                      <TableRow
+                        key={score.id}
+                        className="border-slate-800 hover:bg-slate-950"
+                      >
+                        <TableCell>
+                          <div>
+                            <p className="text-slate-100">{score.productName}</p>
+                            <p className="text-xs text-slate-500">
+                              {score.productSku}
+                            </p>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-slate-300">
+                          {score.locationName}
+                        </TableCell>
+                        <TableCell className="capitalize text-slate-300">
+                          {score.riskType}
+                        </TableCell>
+                        <TableCell className="text-slate-100">
+                          {score.riskScore}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary" className="capitalize">
+                            {score.severity}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-slate-300">
+                          {score.daysOfCover ?? "No demand"}
+                        </TableCell>
+                        <TableCell className="max-w-xs whitespace-normal text-slate-400">
+                          {score.explanation}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <p className="text-sm text-slate-400">
+                No risk scores have been calculated yet.
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -20,7 +20,8 @@ Phase 1 — Project bootstrap: COMPLETE.
 Phase 2 — Authentication: COMPLETE.
 Phase 3 — Database schema: COMPLETE.
 Phase 4 — CSV upload + import: COMPLETE.
-Next phase: Phase 5 — Risk scoring.
+Phase 5 — Risk scoring: COMPLETE.
+Next phase: Phase 6 — Recommendation engine.
 
 Project folder:
 - inventory-optimizer-node
@@ -138,8 +139,8 @@ Phase 1 — Project bootstrap: COMPLETE
 Phase 2 — Authentication: COMPLETE
 Phase 3 — Database schema: COMPLETE
 Phase 4 — CSV upload + import: COMPLETE
-Phase 5 — Risk scoring: NEXT
-Phase 6 — Recommendation engine
+Phase 5 — Risk scoring: COMPLETE
+Phase 6 — Recommendation engine: NEXT
 Phase 7 — Dashboard UI
 Phase 8 — Export + demo data
 Phase 9 — QA + deployment
@@ -192,6 +193,29 @@ Important CSV import decisions:
 - Demand history uses CSV SKU and location name to find product_id and location_id before saving.
 - Active buttons use a hand cursor when clickable.
 - No new production dependencies were added for Phase 4.
+
+## Current completed risk scoring implementation
+
+Phase 5 created and verified the MVP risk scoring flow.
+
+Implemented risk types:
+- stockout
+- overstock
+
+Important risk scoring decisions:
+- Risk scores are calculated from imported inventory snapshots and demand history.
+- The app uses the latest inventory snapshot for each product/location pair.
+- Stockout risk uses available inventory, incoming inventory, reserved inventory, safety stock, average demand, lead time, and reorder buffer.
+- Overstock risk uses available inventory, incoming inventory, safety stock, average demand, and an MVP coverage target.
+- Default lead time is 14 days when a product does not provide lead_time_days.
+- Reorder buffer is 7 days.
+- MVP overstock coverage target is 60 days.
+- Risk severity levels are low, medium, high, and critical.
+- Results are saved into risk_scores with explanation and inputs_summary values.
+- The dashboard can calculate risk scores and show the latest saved scores.
+- The dashboard displays product, SKU, location, risk type, score, severity, days of cover, and explanation.
+- Risk scoring rules are documented in docs/risk-scoring-rules.md.
+- No new production dependencies were added for Phase 5.
 
 ## Phase 3 target
 
