@@ -188,3 +188,13 @@ Import these files in this order:
 4. demand_history
 
 Inventory snapshots and demand history reference products and locations, so products and locations must exist first.
+
+The app should enforce this order in the upload screen.
+
+Users should not be able to upload a later file until the required earlier files have been uploaded.
+
+Locked steps should explain what is missing, for example:
+
+```text
+Upload products first.
+```

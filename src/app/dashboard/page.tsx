@@ -1,6 +1,14 @@
 import { redirect } from "next/navigation"
 
 import { createClient } from "@/lib/supabase/server"
+import { parseLocationsCsvForImport } from "@/lib/csv/location-import"
+import { parseProductsCsvForImport } from "@/lib/csv/product-import"
+import {
+  type CsvImportProgress,
+  getCsvImportStepStatuses,
+} from "@/lib/csv/import-order"
+import { CsvUploadPreview } from "@/components/csv/csv-upload-preview"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -9,6 +17,129 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+
+async function getCsvImportProgress(
+  supabase: Awaited<ReturnType<typeof createClient>>
+): Promise<CsvImportProgress> {
+  const [
+    productsResult,
+    locationsResult,
+    inventorySnapshotsResult,
+    demandHistoryResult,
+  ] = await Promise.all([
+    supabase.from("products").select("id", { count: "exact", head: true }),
+    supabase.from("locations").select("id", { count: "exact", head: true }),
+    supabase
+      .from("inventory_snapshots")
+      .select("id", { count: "exact", head: true }),
+    supabase.from("demand_history").select("id", { count: "exact", head: true }),
+  ])
+
+  return {
+    products: (productsResult.count ?? 0) > 0,
+    locations: (locationsResult.count ?? 0) > 0,
+    inventory_snapshots: (inventorySnapshotsResult.count ?? 0) > 0,
+    demand_history: (demandHistoryResult.count ?? 0) > 0,
+  }
+}
+
+async function importProductsCsv(formData: FormData) {
+  "use server"
+
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    redirect("/login")
+  }
+
+  const csvFile = formData.get("csvFile")
+
+  if (!(csvFile instanceof File)) {
+    redirect("/dashboard?error=Choose a products CSV file first.")
+  }
+
+  const csvText = await csvFile.text()
+  const parsedProducts = parseProductsCsvForImport(csvText)
+
+  if (!parsedProducts.ok) {
+    redirect(`/dashboard?error=${encodeURIComponent(parsedProducts.error)}`)
+  }
+
+  const { error } = await supabase.from("products").upsert(
+    parsedProducts.rows.map((row) => ({
+      ...row,
+      user_id: user.id,
+    })),
+    {
+      onConflict: "user_id,sku",
+    }
+  )
+
+  if (error) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent("Products could not be imported.")}`
+    )
+  }
+
+  redirect(
+    `/dashboard?message=${encodeURIComponent(
+      `Imported ${parsedProducts.rows.length} products.`
+    )}`
+  )
+}
+
+async function importLocationsCsv(formData: FormData) {
+  "use server"
+
+  const supabase = await createClient()
+
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    redirect("/login")
+  }
+
+  const csvFile = formData.get("csvFile")
+
+  if (!(csvFile instanceof File)) {
+    redirect("/dashboard?error=Choose a locations CSV file first.")
+  }
+
+  const csvText = await csvFile.text()
+  const parsedLocations = parseLocationsCsvForImport(csvText)
+
+  if (!parsedLocations.ok) {
+    redirect(`/dashboard?error=${encodeURIComponent(parsedLocations.error)}`)
+  }
+
+  const { error } = await supabase.from("locations").upsert(
+    parsedLocations.rows.map((row) => ({
+      ...row,
+      user_id: user.id,
+    })),
+    {
+      onConflict: "user_id,name",
+    }
+  )
+
+  if (error) {
+    redirect(
+      `/dashboard?error=${encodeURIComponent("Locations could not be imported.")}`
+    )
+  }
+
+  redirect(
+    `/dashboard?message=${encodeURIComponent(
+      `Imported ${parsedLocations.rows.length} locations.`
+    )}`
+  )
+}
 
 async function logout() {
   "use server"
@@ -20,7 +151,15 @@ async function logout() {
   redirect("/login?message=You have been logged out.")
 }
 
-export default async function DashboardPage() {
+type DashboardPageProps = {
+  searchParams: Promise<{
+    error?: string
+    message?: string
+  }>
+}
+
+export default async function DashboardPage({ searchParams }: DashboardPageProps) {
+  const params = await searchParams
   const supabase = await createClient()
 
   const {
@@ -30,6 +169,9 @@ export default async function DashboardPage() {
   if (!user) {
     redirect("/login")
   }
+
+  const importProgress = await getCsvImportProgress(supabase)
+  const importStepStatuses = getCsvImportStepStatuses(importProgress)
 
   return (
     <main className="min-h-screen bg-slate-950 px-6 py-8 text-slate-100">
@@ -115,14 +257,85 @@ export default async function DashboardPage() {
 
         <Card className="border-slate-800 bg-slate-900 text-slate-100">
           <CardHeader>
-            <CardTitle>Next MVP step</CardTitle>
+            <CardTitle>CSV import order</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="space-y-4">
+            {params.error ? (
+              <Alert className="border-red-900 bg-red-950 text-red-100">
+                <AlertDescription className="text-red-100">
+                  {params.error}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {params.message ? (
+              <Alert className="border-emerald-900 bg-emerald-950 text-emerald-100">
+                <AlertDescription className="text-emerald-100">
+                  {params.message}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
             <p className="text-sm text-slate-400">
-              After authentication is complete, we will create the database
-              schema for products, locations, inventory snapshots, demand data,
-              risk scores, recommendations, and audit logs.
+              Upload source data in this order so later files can reference the
+              products and locations already in the database.
             </p>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              {importStepStatuses.map((step, index) => (
+                <div
+                  key={step.importType}
+                  className="rounded-lg border border-slate-800 bg-slate-950 p-4"
+                >
+                  <div className="mb-3 flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-medium uppercase text-slate-500">
+                        Step {index + 1}
+                      </p>
+                      <h2 className="text-base font-medium text-slate-100">
+                        {step.label}
+                      </h2>
+                    </div>
+
+                    <Badge
+                      variant={step.completed ? "default" : "secondary"}
+                      className={
+                        step.enabled
+                          ? ""
+                          : "bg-slate-800 text-slate-400"
+                      }
+                    >
+                      {step.completed
+                        ? "Uploaded"
+                        : step.enabled
+                          ? "Ready"
+                          : "Locked"}
+                    </Badge>
+                  </div>
+
+                  <p className="text-sm text-slate-400">{step.description}</p>
+
+                  {step.lockedReason ? (
+                    <p className="mt-3 text-sm text-amber-300">
+                      {step.lockedReason}
+                    </p>
+                  ) : null}
+
+                  {step.enabled && !step.completed ? (
+                    <CsvUploadPreview
+                      importType={step.importType}
+                      action={
+                        step.importType === "products"
+                          ? importProductsCsv
+                          : step.importType === "locations"
+                            ? importLocationsCsv
+                          : undefined
+                      }
+                    />
+                  ) : null}
+                </div>
+              ))}
+            </div>
           </CardContent>
         </Card>
       </div>
